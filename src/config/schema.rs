@@ -1147,6 +1147,10 @@ pub struct GatewayConfig {
     /// Node-control protocol scaffold (`[gateway.node_control]`).
     #[serde(default)]
     pub node_control: NodeControlConfig,
+
+    /// Google A2A (Agent-to-Agent) protocol configuration (`[gateway.a2a]`).
+    #[serde(default)]
+    pub a2a: A2AConfig,
 }
 
 /// Node-control scaffold settings under `[gateway.node_control]`.
@@ -1165,6 +1169,100 @@ pub struct NodeControlConfig {
     /// Empty means "no explicit allowlist" (accept all IDs).
     #[serde(default)]
     pub allowed_node_ids: Vec<String>,
+}
+
+/// Google A2A (Agent-to-Agent) protocol configuration (`[gateway.a2a]`).
+///
+/// When enabled, exposes:
+/// - `GET /.well-known/agent.json` — Agent Card discovery endpoint
+/// - `POST /a2a` — JSON-RPC 2.0 message endpoint (message/send, tasks/get, tasks/cancel)
+///
+/// Requires the `a2a` compile-time feature flag.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct A2AConfig {
+    /// Enable A2A protocol endpoints.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Human-readable agent name for the Agent Card.
+    #[serde(default = "default_a2a_agent_name")]
+    pub name: String,
+
+    /// Agent description for the Agent Card.
+    #[serde(default = "default_a2a_agent_description")]
+    pub description: String,
+
+    /// Agent version string for the Agent Card.
+    #[serde(default = "default_a2a_agent_version")]
+    pub version: String,
+
+    /// Public URL for the agent (used in Agent Card).
+    /// If empty, derived from gateway host/port at runtime.
+    #[serde(default)]
+    pub public_url: Option<String>,
+
+    /// Maximum number of concurrent A2A tasks to track in memory.
+    #[serde(default = "default_a2a_max_tasks")]
+    pub max_tasks: usize,
+
+    /// TTL in seconds for completed/failed/canceled tasks before eviction.
+    #[serde(default = "default_a2a_task_ttl_secs")]
+    pub task_ttl_secs: u64,
+
+    /// Declared agent skills (capabilities) exposed in the Agent Card.
+    /// Each skill has an id, name, and description.
+    #[serde(default)]
+    pub skills: Vec<A2ASkillConfig>,
+}
+
+/// A single skill declared in the A2A Agent Card.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct A2ASkillConfig {
+    /// Unique skill identifier (e.g. "general-assistant").
+    pub id: String,
+    /// Human-readable skill name.
+    pub name: String,
+    /// Skill description.
+    #[serde(default)]
+    pub description: String,
+    /// Example input tags for this skill.
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+fn default_a2a_agent_name() -> String {
+    "ZeroClaw Agent".into()
+}
+
+fn default_a2a_agent_description() -> String {
+    "AI assistant powered by ZeroClaw".into()
+}
+
+fn default_a2a_agent_version() -> String {
+    env!("CARGO_PKG_VERSION").into()
+}
+
+fn default_a2a_max_tasks() -> usize {
+    1000
+}
+
+fn default_a2a_task_ttl_secs() -> u64 {
+    3600 // 1 hour
+}
+
+impl Default for A2AConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            name: default_a2a_agent_name(),
+            description: default_a2a_agent_description(),
+            version: default_a2a_agent_version(),
+            public_url: None,
+            max_tasks: default_a2a_max_tasks(),
+            task_ttl_secs: default_a2a_task_ttl_secs(),
+            skills: Vec::new(),
+        }
+    }
 }
 
 fn default_gateway_port() -> u16 {
@@ -1214,6 +1312,7 @@ impl Default for GatewayConfig {
             idempotency_ttl_secs: default_idempotency_ttl_secs(),
             idempotency_max_keys: default_gateway_idempotency_max_keys(),
             node_control: NodeControlConfig::default(),
+            a2a: A2AConfig::default(),
         }
     }
 }
@@ -8853,6 +8952,7 @@ channel_id = "C123"
                 auth_token: Some("node-token".into()),
                 allowed_node_ids: vec!["node-1".into(), "node-2".into()],
             },
+            a2a: A2AConfig::default(),
         };
         let toml_str = toml::to_string(&g).unwrap();
         let parsed: GatewayConfig = toml::from_str(&toml_str).unwrap();

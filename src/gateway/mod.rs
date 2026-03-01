@@ -14,6 +14,9 @@ pub mod sse;
 pub mod static_files;
 pub mod ws;
 
+#[cfg(feature = "a2a")]
+pub mod a2a;
+
 use crate::channels::{
     Channel, LinqChannel, NextcloudTalkChannel, QQChannel, SendMessage, WatiChannel,
     WhatsAppChannel,
@@ -325,6 +328,9 @@ pub struct AppState {
     pub cost_tracker: Option<Arc<CostTracker>>,
     /// SSE broadcast channel for real-time events
     pub event_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
+    /// A2A task store (requires `a2a` feature)
+    #[cfg(feature = "a2a")]
+    pub a2a_task_store: a2a::A2ATaskStore,
 }
 
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
@@ -695,6 +701,11 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         max_tool_iterations,
         cost_tracker,
         event_tx,
+        #[cfg(feature = "a2a")]
+        a2a_task_store: a2a::A2ATaskStore::new(
+            config.gateway.a2a.max_tasks,
+            config.gateway.a2a.task_ttl_secs,
+        ),
     };
 
     // Config PUT needs larger body limit (1MB)
@@ -715,6 +726,14 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
             "/v1/chat/completions",
             post(openclaw_compat::handle_v1_chat_completions_with_tools),
         )
+        .layer(RequestBodyLimitLayer::new(
+            openai_compat::CHAT_COMPLETIONS_MAX_BODY_SIZE,
+        ));
+
+    // A2A protocol routes (512KB body limit for JSON-RPC messages)
+    #[cfg(feature = "a2a")]
+    let a2a_routes = Router::new()
+        .route("/a2a", post(a2a::handle_a2a_rpc))
         .layer(RequestBodyLimitLayer::new(
             openai_compat::CHAT_COMPLETIONS_MAX_BODY_SIZE,
         ));
@@ -764,7 +783,18 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         // ── Static assets (web dashboard) ──
         .route("/_app/{*path}", get(static_files::handle_static))
         // ── Config PUT with larger body limit ──
-        .merge(config_put_router)
+        .merge(config_put_router);
+
+    // ── A2A protocol routes (conditionally merged before state application) ──
+    #[cfg(feature = "a2a")]
+    let app = if config.gateway.a2a.enabled {
+        app.route("/.well-known/agent.json", get(a2a::handle_agent_card))
+           .merge(a2a_routes)
+    } else {
+        app
+    };
+
+    let app = app
         .with_state(state)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         .layer(TimeoutLayer::with_status_code(
@@ -2079,6 +2109,8 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            #[cfg(feature = "a2a")]
+            a2a_task_store: a2a::A2ATaskStore::new(100, 3600),
         };
 
         let response = handle_metrics(State(state), test_connect_info(), HeaderMap::new())
@@ -2135,6 +2167,8 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            #[cfg(feature = "a2a")]
+            a2a_task_store: a2a::A2ATaskStore::new(100, 3600),
         };
 
         let response = handle_metrics(State(state), test_connect_info(), HeaderMap::new())
@@ -2177,6 +2211,8 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            #[cfg(feature = "a2a")]
+            a2a_task_store: a2a::A2ATaskStore::new(100, 3600),
         };
 
         let response = handle_metrics(State(state), test_public_connect_info(), HeaderMap::new())
@@ -2220,6 +2256,8 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            #[cfg(feature = "a2a")]
+            a2a_task_store: a2a::A2ATaskStore::new(100, 3600),
         };
 
         let unauthorized =
@@ -2689,6 +2727,8 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            #[cfg(feature = "a2a")]
+            a2a_task_store: a2a::A2ATaskStore::new(100, 3600),
         };
 
         let mut headers = HeaderMap::new();
@@ -2756,6 +2796,8 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            #[cfg(feature = "a2a")]
+            a2a_task_store: a2a::A2ATaskStore::new(100, 3600),
         };
 
         let response = handle_webhook(
@@ -2806,6 +2848,8 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            #[cfg(feature = "a2a")]
+            a2a_task_store: a2a::A2ATaskStore::new(100, 3600),
         };
 
         let response = handle_webhook(
@@ -2856,6 +2900,8 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            #[cfg(feature = "a2a")]
+            a2a_task_store: a2a::A2ATaskStore::new(100, 3600),
         };
 
         let response = handle_node_control(
@@ -2910,6 +2956,8 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            #[cfg(feature = "a2a")]
+            a2a_task_store: a2a::A2ATaskStore::new(100, 3600),
         };
 
         let response = handle_node_control(
@@ -2969,6 +3017,8 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            #[cfg(feature = "a2a")]
+            a2a_task_store: a2a::A2ATaskStore::new(100, 3600),
         };
 
         let headers = HeaderMap::new();
@@ -3050,6 +3100,8 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            #[cfg(feature = "a2a")]
+            a2a_task_store: a2a::A2ATaskStore::new(100, 3600),
         };
 
         let response = handle_webhook(
@@ -3103,6 +3155,8 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            #[cfg(feature = "a2a")]
+            a2a_task_store: a2a::A2ATaskStore::new(100, 3600),
         };
 
         let mut headers = HeaderMap::new();
@@ -3161,6 +3215,8 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            #[cfg(feature = "a2a")]
+            a2a_task_store: a2a::A2ATaskStore::new(100, 3600),
         };
 
         let mut headers = HeaderMap::new();
@@ -3224,6 +3280,8 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            #[cfg(feature = "a2a")]
+            a2a_task_store: a2a::A2ATaskStore::new(100, 3600),
         };
 
         let response = handle_nextcloud_talk_webhook(
@@ -3283,6 +3341,8 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            #[cfg(feature = "a2a")]
+            a2a_task_store: a2a::A2ATaskStore::new(100, 3600),
         };
 
         let mut headers = HeaderMap::new();
@@ -3335,6 +3395,8 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            #[cfg(feature = "a2a")]
+            a2a_task_store: a2a::A2ATaskStore::new(100, 3600),
         };
 
         let response = handle_qq_webhook(
@@ -3386,6 +3448,8 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            #[cfg(feature = "a2a")]
+            a2a_task_store: a2a::A2ATaskStore::new(100, 3600),
         };
 
         let mut headers = HeaderMap::new();
