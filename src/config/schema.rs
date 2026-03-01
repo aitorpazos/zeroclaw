@@ -1551,6 +1551,10 @@ pub struct GatewayConfig {
     /// Node-control protocol scaffold (`[gateway.node_control]`).
     #[serde(default)]
     pub node_control: NodeControlConfig,
+
+    /// A2A (Agent-to-Agent) protocol configuration (`[gateway.a2a]`).
+    #[serde(default)]
+    pub a2a: A2AConfig,
 }
 
 /// Node-control scaffold settings under `[gateway.node_control]`.
@@ -1618,6 +1622,99 @@ impl Default for GatewayConfig {
             idempotency_ttl_secs: default_idempotency_ttl_secs(),
             idempotency_max_keys: default_gateway_idempotency_max_keys(),
             node_control: NodeControlConfig::default(),
+            a2a: A2AConfig::default(),
+        }
+    }
+}
+
+// ── A2A (Agent-to-Agent) Protocol ───────────────────────────────
+
+/// A2A protocol configuration (`[gateway.a2a]` section).
+///
+/// Implements the Google A2A (Agent-to-Agent) protocol for interoperability.
+/// When enabled, exposes `/.well-known/agent.json` (Agent Card) and `POST /a2a`
+/// (JSON-RPC 2.0 endpoint) on the gateway.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct A2AConfig {
+    /// Enable A2A protocol endpoints (default: false)
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Agent name exposed in the Agent Card
+    #[serde(default = "default_a2a_name")]
+    pub name: String,
+
+    /// Agent description exposed in the Agent Card
+    #[serde(default = "default_a2a_description")]
+    pub description: String,
+
+    /// Agent Card protocol version (default: "0.2.1")
+    #[serde(default = "default_a2a_version")]
+    pub version: String,
+
+    /// Public URL for the agent (used in Agent Card). If empty, derived from gateway host:port.
+    #[serde(default)]
+    pub public_url: Option<String>,
+
+    /// Maximum concurrent tasks (default: 100)
+    #[serde(default = "default_a2a_max_tasks")]
+    pub max_tasks: usize,
+
+    /// Task TTL in seconds before eviction (default: 3600 = 1 hour)
+    #[serde(default = "default_a2a_task_ttl_secs")]
+    pub task_ttl_secs: u64,
+
+    /// Skills advertised in the Agent Card
+    #[serde(default)]
+    pub skills: Vec<A2ASkillConfig>,
+}
+
+/// A2A skill definition for the Agent Card.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct A2ASkillConfig {
+    /// Unique skill identifier
+    pub id: String,
+    /// Human-readable skill name
+    pub name: String,
+    /// Skill description
+    #[serde(default)]
+    pub description: String,
+    /// Tags for skill discovery
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+fn default_a2a_name() -> String {
+    "ZeroClaw Agent".into()
+}
+
+fn default_a2a_description() -> String {
+    "AI assistant powered by ZeroClaw".into()
+}
+
+fn default_a2a_version() -> String {
+    "0.2.1".into()
+}
+
+fn default_a2a_max_tasks() -> usize {
+    100
+}
+
+fn default_a2a_task_ttl_secs() -> u64 {
+    3600
+}
+
+impl Default for A2AConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            name: default_a2a_name(),
+            description: default_a2a_description(),
+            version: default_a2a_version(),
+            public_url: None,
+            max_tasks: default_a2a_max_tasks(),
+            task_ttl_secs: default_a2a_task_ttl_secs(),
+            skills: Vec::new(),
         }
     }
 }
