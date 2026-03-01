@@ -7,6 +7,7 @@
 //! - Request timeouts (30s) to prevent slow-loris attacks
 //! - Header sanitization (handled by axum/hyper)
 
+pub mod a2a;
 pub mod api;
 mod openai_compat;
 mod openclaw_compat;
@@ -371,6 +372,8 @@ pub struct AppState {
     pub cost_tracker: Option<Arc<CostTracker>>,
     /// SSE broadcast channel for real-time events
     pub event_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
+    /// A2A task store (initialized when A2A is enabled)
+    pub a2a_store: Option<a2a::TaskStore>,
 }
 
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
@@ -770,7 +773,17 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         max_tool_iterations,
         cost_tracker,
         event_tx,
+        a2a_store: if config.gateway.a2a.enabled {
+            Some(a2a::TaskStore::new(
+                config.gateway.a2a.max_tasks,
+                config.gateway.a2a.task_ttl_secs,
+            ))
+        } else {
+            None
+        },
     };
+
+    let a2a_enabled = state.a2a_store.is_some();
 
     // Config PUT needs larger body limit (1MB)
     let config_put_router = Router::new()
@@ -846,7 +859,21 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         // ── Static assets (web dashboard) ──
         .route("/_app/{*path}", get(static_files::handle_static))
         // ── Config PUT with larger body limit ──
-        .merge(config_put_router)
+        .merge(config_put_router);
+
+    // ── A2A protocol routes (conditional on config) ──
+    let app = if a2a_enabled {
+        tracing::info!("A2A protocol enabled — registering /.well-known/agent.json and /a2a");
+        app.route(
+            "/.well-known/agent.json",
+            get(a2a::handle_agent_card),
+        )
+        .route("/a2a", post(a2a::handle_a2a_rpc))
+    } else {
+        app
+    };
+
+    let app = app
         .with_state(state)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         .layer(TimeoutLayer::with_status_code(
@@ -2821,6 +2848,7 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let response = handle_metrics(State(state), test_connect_info(), HeaderMap::new())
@@ -2882,6 +2910,7 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let response = handle_metrics(State(state), test_connect_info(), HeaderMap::new())
@@ -2926,6 +2955,7 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let response = handle_metrics(State(state), test_public_connect_info(), HeaderMap::new())
@@ -2971,6 +3001,7 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let unauthorized =
@@ -3485,6 +3516,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -3558,6 +3590,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let response = handle_webhook(
@@ -3612,6 +3645,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let response = handle_webhook(
@@ -3667,6 +3701,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let response = handle_webhook(
@@ -3731,6 +3766,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let response = handle_node_control(
@@ -3788,6 +3824,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let response = handle_node_control(
@@ -3849,6 +3886,9 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
+            bluebubbles: None,
+            bluebubbles_webhook_secret: None,
         };
 
         let response = handle_node_control(
@@ -3906,6 +3946,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let headers = HeaderMap::new();
@@ -3993,6 +4034,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let response = handle_webhook(
@@ -4050,6 +4092,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -4112,6 +4155,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -4188,6 +4232,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let response = handle_github_webhook(
@@ -4243,6 +4288,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let body = r#"{
@@ -4309,6 +4355,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let body = r#"{
@@ -4380,6 +4427,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let response = handle_nextcloud_talk_webhook(
@@ -4441,6 +4489,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -4495,6 +4544,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let response = handle_qq_webhook(
@@ -4548,6 +4598,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            a2a_store: None,
         };
 
         let mut headers = HeaderMap::new();
