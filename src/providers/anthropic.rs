@@ -319,6 +319,14 @@ impl AnthropicProvider {
     fn build_user_content_blocks(content: &str) -> Vec<NativeContentOut> {
         let (text_part, image_refs) = crate::multimodal::parse_image_markers(content);
         if image_refs.is_empty() {
+            if content.trim().is_empty() {
+                // Return a placeholder to avoid empty text content blocks
+                // which Anthropic rejects with 400.
+                return vec![NativeContentOut::Text {
+                    text: "(empty)".to_string(),
+                    cache_control: None,
+                }];
+            }
             return vec![NativeContentOut::Text {
                 text: content.to_string(),
                 cache_control: None,
@@ -356,7 +364,9 @@ impl AnthropicProvider {
                             role: "assistant".to_string(),
                             content: blocks,
                         });
-                    } else {
+                    } else if !msg.content.trim().is_empty() {
+                        // Skip empty assistant text blocks — Anthropic rejects
+                        // text content blocks with empty strings.
                         native_messages.push(NativeMessage {
                             role: "assistant".to_string(),
                             content: vec![NativeContentOut::Text {
@@ -369,7 +379,8 @@ impl AnthropicProvider {
                 "tool" => {
                     if let Some(tool_result) = Self::parse_tool_result_message(&msg.content) {
                         native_messages.push(tool_result);
-                    } else {
+                    } else if !msg.content.trim().is_empty() {
+                        // Skip empty tool result text blocks.
                         native_messages.push(NativeMessage {
                             role: "user".to_string(),
                             content: vec![NativeContentOut::Text {
