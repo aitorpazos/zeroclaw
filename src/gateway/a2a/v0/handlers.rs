@@ -1,10 +1,16 @@
-//! A2A protocol HTTP handlers.
+//! A2A v0.x (draft/0.2.x) HTTP handlers.
 //!
-//! - `GET /.well-known/agent.json` — Agent Card discovery
-//! - `POST /a2a` — JSON-RPC 2.0 endpoint
+//! - `GET /.well-known/agent.json` — Agent Card discovery (v0)
+//! - `POST /a2a` — JSON-RPC 2.0 endpoint with v0 method names:
+//!   - `message/send` — send a message and get a response
+//!   - `tasks/get` — retrieve task status and history
+//!   - `tasks/cancel` — cancel a running task
+//!
+//! To remove v0 support, delete the `v0/` directory and remove references in `a2a/mod.rs`.
 
-use super::store::CancelError;
 use super::types::*;
+use crate::gateway::a2a::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
+use crate::gateway::a2a::store::CancelError;
 use crate::gateway::AppState;
 use axum::{
     extract::State,
@@ -12,8 +18,8 @@ use axum::{
     response::{IntoResponse, Json},
 };
 
-/// GET `/.well-known/agent.json` — serves the Agent Card.
-pub async fn handle_agent_card(State(state): State<AppState>) -> impl IntoResponse {
+/// GET `/.well-known/agent.json` — serves the v0 Agent Card.
+pub async fn handle_agent_card_v0(State(state): State<AppState>) -> impl IntoResponse {
     let config = state.config.lock();
     let a2a = &config.gateway.a2a;
 
@@ -57,44 +63,18 @@ pub async fn handle_agent_card(State(state): State<AppState>) -> impl IntoRespon
     Json(card)
 }
 
-/// POST `/a2a` — JSON-RPC 2.0 dispatcher.
-pub async fn handle_a2a_rpc(
-    State(state): State<AppState>,
-    body: Result<Json<JsonRpcRequest>, axum::extract::rejection::JsonRejection>,
-) -> impl IntoResponse {
-    let Json(req) = match body {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!("A2A JSON parse error: {e}");
-            return (
-                StatusCode::OK,
-                Json(JsonRpcResponse::error(
-                    None,
-                    PARSE_ERROR,
-                    format!("Parse error: {e}"),
-                )),
-            );
-        }
-    };
-
-    if req.jsonrpc != "2.0" {
-        return (
-            StatusCode::OK,
-            Json(JsonRpcResponse::error(
-                req.id,
-                INVALID_REQUEST,
-                "Invalid JSON-RPC version, expected \"2.0\"",
-            )),
-        );
-    }
-
+/// POST `/a2a` — JSON-RPC 2.0 dispatcher for v0 methods.
+pub async fn handle_a2a_rpc_v0(
+    state: &AppState,
+    req: JsonRpcRequest,
+) -> (StatusCode, Json<JsonRpcResponse>) {
     let response = match req.method.as_str() {
-        "message/send" => handle_message_send(&state, req.id.clone(), req.params).await,
-        "tasks/get" => handle_tasks_get(&state, req.id.clone(), req.params),
-        "tasks/cancel" => handle_tasks_cancel(&state, req.id.clone(), req.params),
+        "message/send" => handle_message_send(state, req.id.clone(), req.params).await,
+        "tasks/get" => handle_tasks_get(state, req.id.clone(), req.params),
+        "tasks/cancel" => handle_tasks_cancel(state, req.id.clone(), req.params),
         _ => JsonRpcResponse::error(
             req.id,
-            METHOD_NOT_FOUND,
+            super::types::METHOD_NOT_FOUND,
             format!("Method not found: {}", req.method),
         ),
     };
@@ -102,7 +82,7 @@ pub async fn handle_a2a_rpc(
     (StatusCode::OK, Json(response))
 }
 
-/// Handle `message/send` — create a task, process the message, return the result.
+/// Handle `message/send` (v0).
 async fn handle_message_send(
     state: &AppState,
     id: Option<serde_json::Value>,
@@ -135,7 +115,6 @@ async fn handle_message_send(
         return JsonRpcResponse::error(id, INVALID_PARAMS, "Message contains no text parts");
     }
 
-    // Get the task store from state
     let task_store = match state.a2a_store.as_ref() {
         Some(store) => store,
         None => {
@@ -143,11 +122,10 @@ async fn handle_message_send(
         }
     };
 
-    // Create the task
     let task = match task_store.create_task(
         send_params.id,
         send_params.session_id,
-        send_params.message,
+        &user_text,
     ) {
         Some(t) => t,
         None => {
@@ -160,32 +138,29 @@ async fn handle_message_send(
     };
 
     let task_id = task.id.clone();
-
-    // Mark as working
     task_store.mark_working(&task_id);
 
-    // Process the message through the agent
     let session_ref = task.session_id.as_deref();
-    match super::super::run_gateway_chat_with_tools(state, &user_text, session_ref).await {
+    match super::super::super::run_gateway_chat_with_tools(state, &user_text, session_ref).await {
         Ok(response) => {
             task_store.complete_task(&task_id, &response);
         }
         Err(e) => {
-            tracing::error!("A2A task {task_id} failed: {e:#}");
+            tracing::error!("A2A v0 task {task_id} failed: {e:#}");
             task_store.fail_task(&task_id, &format!("Agent error: {e}"));
         }
     }
 
-    // Return the final task state
     match task_store.get_task(&task_id, None) {
         Some(task) => {
-            JsonRpcResponse::success(id, serde_json::to_value(&task).unwrap_or_default())
+            let v0_task = A2ATask::from_store(&task);
+            JsonRpcResponse::success(id, serde_json::to_value(&v0_task).unwrap_or_default())
         }
         None => JsonRpcResponse::error(id, INTERNAL_ERROR, "Task disappeared unexpectedly"),
     }
 }
 
-/// Handle `tasks/get` — retrieve a task by ID.
+/// Handle `tasks/get` (v0).
 fn handle_tasks_get(
     state: &AppState,
     id: Option<serde_json::Value>,
@@ -211,7 +186,8 @@ fn handle_tasks_get(
 
     match task_store.get_task(&get_params.id, get_params.history_length) {
         Some(task) => {
-            JsonRpcResponse::success(id, serde_json::to_value(&task).unwrap_or_default())
+            let v0_task = A2ATask::from_store(&task);
+            JsonRpcResponse::success(id, serde_json::to_value(&v0_task).unwrap_or_default())
         }
         None => JsonRpcResponse::error(
             id,
@@ -221,7 +197,7 @@ fn handle_tasks_get(
     }
 }
 
-/// Handle `tasks/cancel` — cancel a running task.
+/// Handle `tasks/cancel` (v0).
 fn handle_tasks_cancel(
     state: &AppState,
     id: Option<serde_json::Value>,
@@ -247,7 +223,8 @@ fn handle_tasks_cancel(
 
     match task_store.cancel_task(&cancel_params.id) {
         Ok(task) => {
-            JsonRpcResponse::success(id, serde_json::to_value(&task).unwrap_or_default())
+            let v0_task = A2ATask::from_store(&task);
+            JsonRpcResponse::success(id, serde_json::to_value(&v0_task).unwrap_or_default())
         }
         Err(CancelError::NotFound) => JsonRpcResponse::error(
             id,

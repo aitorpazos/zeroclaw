@@ -1648,7 +1648,7 @@ pub struct A2AConfig {
     #[serde(default = "default_a2a_description")]
     pub description: String,
 
-    /// Agent Card protocol version (default: "0.2.1")
+    /// Agent Card protocol version (default: "1.0.0-rc")
     #[serde(default = "default_a2a_version")]
     pub version: String,
 
@@ -1693,7 +1693,7 @@ fn default_a2a_description() -> String {
 }
 
 fn default_a2a_version() -> String {
-    "0.2.1".into()
+    "1.0.0-rc".into()
 }
 
 fn default_a2a_max_tasks() -> usize {

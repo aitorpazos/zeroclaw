@@ -863,12 +863,16 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
 
     // ── A2A protocol routes (conditional on config) ──
     let app = if a2a_enabled {
-        tracing::info!("A2A protocol enabled — registering /.well-known/agent.json and /a2a");
-        app.route(
-            "/.well-known/agent.json",
-            get(a2a::handle_agent_card),
-        )
-        .route("/a2a", post(a2a::handle_a2a_rpc))
+        tracing::info!(
+            "A2A protocol enabled — registering agent card endpoints and /a2a (multi-version)"
+        );
+        app
+            // v0 legacy Agent Card endpoint
+            .route("/.well-known/agent.json", get(a2a::handle_agent_card_v0))
+            // v1 Agent Card endpoint
+            .route("/.well-known/agent-card.json", get(a2a::handle_agent_card_v1))
+            // Unified JSON-RPC endpoint (version-negotiated)
+            .route("/a2a", post(a2a::handle_a2a_rpc))
     } else {
         app
     };
