@@ -8,6 +8,10 @@ use tokio::time::Duration;
 
 const STATUS_FLUSH_SECONDS: u64 = 5;
 
+/// Grace period after shutdown signal before force-aborting component tasks.
+/// Allows in-flight requests and channel messages to complete.
+const SHUTDOWN_GRACE_PERIOD_SECS: u64 = 15;
+
 pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
     let initial_backoff = config.reliability.channel_initial_backoff_secs.max(1);
     let max_backoff = config
@@ -90,19 +94,77 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
     println!("🧠 ZeroClaw daemon started");
     println!("   Gateway:  http://{host}:{port}");
     println!("   Components: gateway, channels, heartbeat, scheduler");
-    println!("   Ctrl+C to stop");
+    println!("   Send SIGINT (Ctrl+C) or SIGTERM to stop");
 
-    tokio::signal::ctrl_c().await?;
+    wait_for_shutdown_signal().await;
+    tracing::info!("Shutdown signal received, starting graceful shutdown");
     crate::health::mark_component_error("daemon", "shutdown requested");
 
-    for handle in &handles {
-        handle.abort();
-    }
-    for handle in handles {
-        let _ = handle.await;
+    // Give components a grace period to finish in-flight work
+    tracing::info!(
+        "Waiting up to {SHUTDOWN_GRACE_PERIOD_SECS}s for components to finish in-flight work"
+    );
+    let grace_deadline =
+        tokio::time::Instant::now() + Duration::from_secs(SHUTDOWN_GRACE_PERIOD_SECS);
+    let mut remaining = handles;
+
+    // Poll until all handles finish or the deadline expires
+    loop {
+        remaining.retain(|h| !h.is_finished());
+        if remaining.is_empty() {
+            tracing::info!("All components stopped cleanly");
+            break;
+        }
+        if tokio::time::Instant::now() >= grace_deadline {
+            tracing::warn!(
+                "Grace period expired with {} components still running, aborting",
+                remaining.len()
+            );
+            for handle in &remaining {
+                handle.abort();
+            }
+            for handle in remaining {
+                let _ = handle.await;
+            }
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     Ok(())
+}
+
+/// Wait for either SIGINT (Ctrl+C) or SIGTERM (Kubernetes pod termination).
+///
+/// On Unix, listens for both signals concurrently and returns on whichever
+/// arrives first. On non-Unix platforms, falls back to SIGINT only.
+async fn wait_for_shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install SIGINT handler");
+    };
+
+    #[cfg(unix)]
+    {
+        let sigterm = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+
+        tokio::select! {
+            () = ctrl_c => tracing::info!("Received SIGINT"),
+            () = sigterm => tracing::info!("Received SIGTERM"),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await;
+        tracing::info!("Received SIGINT");
+    }
 }
 
 pub fn state_file_path(config: &Config) -> PathBuf {
@@ -546,5 +608,43 @@ mod tests {
 
         let target = heartbeat_delivery_target(&config).unwrap();
         assert_eq!(target, Some(("telegram".to_string(), "123456".to_string())));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn wait_for_shutdown_signal_responds_to_sigterm() {
+        use std::process;
+
+        let handle = tokio::spawn(async {
+            wait_for_shutdown_signal().await;
+        });
+
+        // Give the signal handler time to install
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Send SIGTERM to our own process
+        let pid = process::id();
+        std::process::Command::new("kill")
+            .args(["-s", "TERM", &pid.to_string()])
+            .status()
+            .expect("failed to send SIGTERM");
+
+        // Should return promptly
+        let result = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        assert!(result.is_ok(), "shutdown signal handler did not return");
+    }
+
+    #[test]
+    fn shutdown_grace_period_is_reasonable() {
+        // Ensure the grace period is between 5 and 30 seconds
+        // (Kubernetes default terminationGracePeriodSeconds is 30)
+        assert!(
+            SHUTDOWN_GRACE_PERIOD_SECS >= 5,
+            "grace period too short for in-flight requests"
+        );
+        assert!(
+            SHUTDOWN_GRACE_PERIOD_SECS <= 30,
+            "grace period exceeds default Kubernetes terminationGracePeriodSeconds"
+        );
     }
 }
