@@ -1521,6 +1521,7 @@ mod tests {
             path_prefix: String::new(),
             web_dist_dir: None,
             canvas_store: zeroclaw_runtime::tools::CanvasStore::new(),
+            a2a_store: None,
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             reload_tx: None,
             #[cfg(feature = "webauthn")]

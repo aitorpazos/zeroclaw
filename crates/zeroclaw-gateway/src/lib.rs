@@ -7,6 +7,7 @@
 //! - Request timeouts (30s) to prevent slow-loris attacks
 //! - Header sanitization (handled by axum/hyper)
 
+pub mod a2a;
 pub mod acp;
 pub mod api;
 pub mod api_config;
@@ -425,6 +426,8 @@ pub struct AppState {
     /// WebAuthn state for hardware key authentication (optional, requires `webauthn` feature)
     #[cfg(feature = "webauthn")]
     pub webauthn: Option<Arc<api_webauthn::WebAuthnState>>,
+    /// A2A task store (initialized when A2A is enabled)
+    pub a2a_store: Option<a2a::TaskStore>,
     /// Per-session cancellation tokens for aborting in-flight agent responses.
     /// Key is session_key (e.g. `gw_<session_id>`), value is the token for the
     /// current turn. Entries are inserted before each turn and removed after
@@ -1065,6 +1068,14 @@ pub async fn run_gateway(
         path_prefix: path_prefix.unwrap_or("").to_string(),
         web_dist_dir,
         canvas_store,
+        a2a_store: if config.gateway.a2a.enabled {
+            Some(a2a::TaskStore::new(
+                config.gateway.a2a.max_tasks,
+                config.gateway.a2a.task_ttl_secs,
+            ))
+        } else {
+            None
+        },
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         #[cfg(feature = "webauthn")]
         webauthn: if config.security.webauthn.enabled {
@@ -1275,7 +1286,20 @@ pub async fn run_gateway(
         // ── Static assets (web dashboard) ──
         .route("/_app/{*path}", get(static_files::handle_static))
         // ── SPA fallback: non-API GET requests serve index.html ──
-        .fallback(get(static_files::handle_spa_fallback))
+        .fallback(get(static_files::handle_spa_fallback));
+
+    // ── A2A protocol routes (conditional on config) ──
+    let a2a_enabled = state.a2a_store.is_some();
+    let inner = if a2a_enabled {
+        tracing::info!("A2A protocol enabled — registering /.well-known/agent.json and /a2a");
+        inner
+            .route("/.well-known/agent.json", get(a2a::handle_agent_card))
+            .route("/a2a", post(a2a::handle_a2a_rpc))
+    } else {
+        inner
+    };
+
+    let inner = inner
         .with_state(state.clone())
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         .layer(TimeoutLayer::with_status_code(
@@ -1569,11 +1593,11 @@ async fn persist_pairing_tokens(config: Arc<Mutex<Config>>, pairing: &PairingGua
 /// token / cost totals captured from the cost-tracking scope (when present)
 /// so callers can populate observer-event annotations without racing
 /// concurrent webhook traffic that shares the same `CostTracker`.
-struct GatewayChatOutcome {
-    response: String,
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    cost_usd: Option<f64>,
+pub(crate) struct GatewayChatOutcome {
+    pub(crate) response: String,
+    pub(crate) input_tokens: Option<u64>,
+    pub(crate) output_tokens: Option<u64>,
+    pub(crate) cost_usd: Option<f64>,
 }
 
 /// Returns a structured `needs_onboarding` error when `model` is empty
@@ -1612,7 +1636,7 @@ fn needs_onboarding_channel_reply() -> String {
 }
 
 /// Full-featured chat with tools for channel and webhook handlers.
-async fn run_gateway_chat_with_tools(
+pub(crate) async fn run_gateway_chat_with_tools(
     state: &AppState,
     message: &str,
     session_id: Option<&str>,
@@ -2892,6 +2916,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            a2a_store: None,
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(feature = "webauthn")]
             webauthn: None,
@@ -2961,6 +2986,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            a2a_store: None,
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(feature = "webauthn")]
             webauthn: None,
@@ -3420,6 +3446,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            a2a_store: None,
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(feature = "webauthn")]
             webauthn: None,
@@ -3502,6 +3529,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            a2a_store: None,
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(feature = "webauthn")]
             webauthn: None,
@@ -3596,6 +3624,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            a2a_store: None,
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(feature = "webauthn")]
             webauthn: None,
@@ -3662,6 +3691,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            a2a_store: None,
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(feature = "webauthn")]
             webauthn: None,
@@ -3733,6 +3763,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            a2a_store: None,
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(feature = "webauthn")]
             webauthn: None,
@@ -3809,6 +3840,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            a2a_store: None,
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(feature = "webauthn")]
             webauthn: None,
@@ -3882,6 +3914,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            a2a_store: None,
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(feature = "webauthn")]
             webauthn: None,
@@ -3992,6 +4025,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            a2a_store: None,
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(feature = "webauthn")]
             webauthn: None,
